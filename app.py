@@ -15,18 +15,10 @@ destination = st.text_input("לאיזה יעד נכתוב את הפוסט היו
 
 if st.button("ייצר פוסט 🪄"):
     if destination:
-        with st.spinner("הסוכן מאתר מודל זמין וכותב את הפוסט..."):
+        with st.spinner("הסוכן כותב את הפוסט..."):
             try:
-                # טריק: משיכת רשימת המודלים שזמינים ספציפית למפתח שלך
-                available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                
-                if not available_models:
-                    st.error("לא נמצאו מודלים התומכים ביצירת טקסט עבור מפתח זה.")
-                    st.stop()
-                
-                # שימוש במודל הראשון שהמערכת מאשרת
-                model_name = available_models[0]
-                model = genai.GenerativeModel(model_name)
+                # שימוש במודל הספציפי שגוגל דורשת לפי הודעת השגיאה
+                model = genai.GenerativeModel('gemini-3.8-flash')
                 
                 prompt = f"""
                 אתה קופירייטר מומחה לטיולים הכותב פוסטים עבור קהילת "מטיילים מצייצים".
