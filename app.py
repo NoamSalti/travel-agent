@@ -38,7 +38,7 @@ if st.button("ייצר פוסט 🪄"):
             
             try:
                 # קריאה למודל של ג'מיני
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                model = genai.GenerativeModel('gemini-pro')
                 response = model.generate_content(prompt)
                 
                 # הצגת התוצאה
