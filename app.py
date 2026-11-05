@@ -3,7 +3,7 @@ from google import genai
 
 st.set_page_config(page_title="Travel Content Agent", page_icon="✈️")
 st.title("✈️ Travel Content Agent")
-st.markdown("מחולל פוסטים אוטומטי בסגנון 'מטיילים מצייצים'")
+st.markdown("מחולל פוסטים אוטומטי בסגנון מטיילים מצייצים")
 
 try:
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
