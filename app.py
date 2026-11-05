@@ -15,8 +15,20 @@ destination = st.text_input("לאיזה יעד נכתוב את הפוסט היו
 
 if st.button("ייצר פוסט 🪄"):
     if destination:
-        with st.spinner("הסוכן כותב את הפוסט..."):
+        with st.spinner("הסוכן מאתר מודל זמין וכותב את הפוסט..."):
             try:
+                # איתור אוטומטי של המודל הראשון שזמין בחשבון שלך
+                available_models = [
+                    m.name for m in client.models.list() 
+                    if hasattr(m, 'supported_actions') and 'generateContent' in m.supported_actions
+                ]
+                
+                # אם המבנה שונה, נעשה שליפה כללית של שם מודל זמין ראשון
+                if not available_models:
+                    model_name = 'gemini-3.8-flash'
+                else:
+                    model_name = available_models[0]
+
                 prompt = f"""
                 אתה קופירייטר מומחה לטיולים הכותב פוסטים עבור קהילת "מטיילים מצייצים".
                 כתוב פוסט מרתק על היעד: {destination}.
@@ -35,7 +47,7 @@ if st.button("ייצר פוסט 🪄"):
                 """
                 
                 response = client.models.generate_content(
-                    model='gemini-3.8-flash',
+                    model=model_name,
                     contents=prompt
                 )
                 st.success("הפוסט מוכן! 🤖")
