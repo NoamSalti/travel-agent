@@ -16,9 +16,9 @@ MAX_DELAY = 15.0
 MAX_FALLBACK_MODELS = 6
 DEAD_TTL = 30 * 60             # remember exhausted / unavailable models for 30 minutes
 REQUEST_TIMEOUT_MS = 25_000    # a hung call fails fast instead of blocking for minutes
-MAX_OUTPUT_TOKENS = 1200       # a post is short; capping output also speeds things up
+MAX_OUTPUT_TOKENS = 8192       # generous: "thinking" tokens count against this limit too
 
-CREDIT = "אם יש שאלות, עקבו ותכתבו ל-@Noam_Salti! תודה ל@noam_salti על כל הפרטים והתמונות המדהימות!"
+CREDIT = "אם יש שאלות, עקבו ותכתבו לה! תודה ל@noam_salti על כל הפרטים והתמונות המדהימות!"
 CAROUSEL_HEADER = "הצעה לתמונת קרוסלה ראשונה:"
 
 SYSTEM_INSTRUCTION = f"""
@@ -169,6 +169,11 @@ def generate_post(client, destination: str, status, log: list) -> tuple[str, str
                 contents, config = build(model)
                 resp = client.models.generate_content(model=model, contents=contents, config=config)
                 if resp.text and resp.text.strip():
+                    finish = str(getattr(resp.candidates[0], "finish_reason", "")) if resp.candidates else ""
+                    if "MAX_TOKENS" in finish:
+                        # Truncated post: never show it, try another model instead
+                        log.append(f"סבב {rnd + 1} | {model}: תשובה נחתכה (MAX_TOKENS)")
+                        continue
                     return resp.text, model
                 log.append(f"סבב {rnd + 1} | {model}: תשובה ריקה")
             except errors.APIError as e:
@@ -228,7 +233,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.title("✈️ Travel Content Agent")
-st.markdown("מחולל פוסטים אוטומטי בסגנון 'מטיילים מצייצים'")
+st.markdown("מחולל פוסטים אוטומטי בסגנון מטיילים מצייצים")
 
 try:
     client = get_client()
