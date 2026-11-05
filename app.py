@@ -13,7 +13,8 @@ PREFERRED_MODEL = st.secrets.get("MODEL_NAME", "gemini-3.8-flash")
 MAX_ROUNDS = 4                 # each round tries every live model once
 BASE_DELAY = 2.0               # seconds between rounds, doubles (2, 4, 8)
 MAX_DELAY = 15.0
-MAX_FALLBACK_MODELS = 3
+MAX_FALLBACK_MODELS = 6
+DEAD_TTL = 30 * 60             # remember exhausted / unavailable models for 30 minutes
 REQUEST_TIMEOUT_MS = 25_000    # a hung call fails fast instead of blocking for minutes
 MAX_OUTPUT_TOKENS = 1200       # a post is short; capping output also speeds things up
 
@@ -65,14 +66,24 @@ def discover_models(_client, preferred: str) -> list[str]:
             actions = getattr(m, "supported_actions", None) or []
             if "generateContent" not in actions:
                 continue
-            if "flash" not in name or any(s in name for s in skip):
+            if not ("flash" in name or name.startswith("gemma")) or any(s in name for s in skip):
                 continue
             found.append(name)
     except Exception:
         pass  # fall back to the preferred model only
 
-    # Newer / non-lite first
-    found = sorted(set(found), key=lambda n: ("lite" in n, _neg(n)))
+    # Order: stable Flash > Flash-Lite > Gemma > preview/experimental > "-latest" aliases.
+    # Aliases go last because they usually point at the same overloaded model.
+    def rank(n: str):
+        return (
+            n.endswith("-latest"),
+            any(t in n for t in ("preview", "omni", "exp")),
+            n.startswith("gemma"),
+            "lite" in n,
+            _neg(n),
+        )
+
+    found = sorted(set(found), key=rank)
     ordered = [preferred] + [n for n in found if n != preferred]
     ordered = ordered[: MAX_FALLBACK_MODELS + 1]
     # Only remember a successful listing, so a failed lookup is retried next time
@@ -99,9 +110,9 @@ def classify(e: errors.APIError) -> str:
         return "rate"           # per-minute limit: wait, then retry
     if code in (500, 502, 503, 504):
         return "retry"
-    if code == 404:
-        return "skip"           # model not available to this key
-    return "fatal"              # 400 / 401 / 403 etc.
+    if code in (400, 404):
+        return "skip"           # model unavailable / doesn't support this request
+    return "fatal"              # 401 / 403 etc. (bad key or permissions)
 
 
 def suggested_wait(e: errors.APIError, attempt: int) -> float:
@@ -126,14 +137,25 @@ def generate_post(client, destination: str, status, log: list) -> tuple[str, str
     """
     models = discover_models(client, PREFERRED_MODEL)
     log.append("מודלים שנבדקו: " + ", ".join(models))
-    config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_INSTRUCTION,
-        temperature=0.9,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
-        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
-    )
-    contents = f"כתוב פוסט על היעד: {destination}"
-    dead = set()  # models that returned 404 or exhausted their daily quota
+    request = f"כתוב פוסט על היעד: {destination}"
+
+    def build(model: str):
+        kwargs = dict(
+            temperature=0.9,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
+        )
+        if model.startswith("gemma"):
+            # Gemma models don't accept a system instruction: put it in the prompt
+            return f"{SYSTEM_INSTRUCTION}\n\n{request}", types.GenerateContentConfig(**kwargs)
+        return request, types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, **kwargs)
+
+    # Models that were exhausted / unavailable recently are skipped for DEAD_TTL
+    persisted = st.session_state.setdefault("dead_models", {})
+    dead = {m for m, expiry in persisted.items() if expiry > time.time()}
+    if all(m in dead for m in models):
+        persisted.clear()
+        dead = set()
     last_error = None
 
     for rnd in range(MAX_ROUNDS):
@@ -144,6 +166,7 @@ def generate_post(client, destination: str, status, log: list) -> tuple[str, str
         for model in live:
             try:
                 status.update(label=f"סבב {rnd + 1}/{MAX_ROUNDS}: מנסה את {model}...")
+                contents, config = build(model)
                 resp = client.models.generate_content(model=model, contents=contents, config=config)
                 if resp.text and resp.text.strip():
                     return resp.text, model
@@ -156,6 +179,7 @@ def generate_post(client, destination: str, status, log: list) -> tuple[str, str
                     raise
                 if kind in ("daily", "skip"):
                     dead.add(model)
+                    persisted[model] = time.time() + DEAD_TTL
                 elif kind == "rate":
                     wait_hint = max(wait_hint, suggested_wait(e, rnd))
             except Exception as e:  # timeouts / network hiccups: treat as transient
