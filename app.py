@@ -10,10 +10,12 @@ from google.genai import errors, types
 # Config
 # ----------------------------------------------------------------------------
 PREFERRED_MODEL = st.secrets.get("MODEL_NAME", "gemini-3.8-flash")
-MAX_RETRIES_PER_MODEL = 3      # attempts per model on transient errors
-BASE_DELAY = 2.0               # seconds, doubles each attempt (2, 4, 8...)
-MAX_DELAY = 30.0
-MAX_FALLBACK_MODELS = 4
+MAX_ROUNDS = 4                 # each round tries every live model once
+BASE_DELAY = 2.0               # seconds between rounds, doubles (2, 4, 8)
+MAX_DELAY = 15.0
+MAX_FALLBACK_MODELS = 3
+REQUEST_TIMEOUT_MS = 25_000    # a hung call fails fast instead of blocking for minutes
+MAX_OUTPUT_TOKENS = 1200       # a post is short; capping output also speeds things up
 
 CREDIT = "אם יש שאלות, עקבו ותכתבו ל-@Noam_Salti! תודה ל@noam_salti על כל הפרטים והתמונות המדהימות!"
 CAROUSEL_HEADER = "הצעה לתמונת קרוסלה ראשונה:"
@@ -47,13 +49,14 @@ def get_client():
     return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def discover_models(_client, preferred: str) -> list[str]:
     """Return an ordered list of text-capable Flash models this key can actually use.
 
     Hardcoded names cause 404s when access changes, so we ask the API what is
     available. The preferred model always goes first.
     """
+    if st.session_state.get("models"):
+        return st.session_state["models"]
     skip = ("image", "tts", "live", "audio", "embedding", "robotics", "computer-use", "native")
     found = []
     try:
@@ -71,7 +74,11 @@ def discover_models(_client, preferred: str) -> list[str]:
     # Newer / non-lite first
     found = sorted(set(found), key=lambda n: ("lite" in n, _neg(n)))
     ordered = [preferred] + [n for n in found if n != preferred]
-    return ordered[: MAX_FALLBACK_MODELS + 1]
+    ordered = ordered[: MAX_FALLBACK_MODELS + 1]
+    # Only remember a successful listing, so a failed lookup is retried next time
+    if found:
+        st.session_state["models"] = ordered
+    return ordered
 
 
 def _neg(s: str) -> tuple:
@@ -110,36 +117,55 @@ def suggested_wait(e: errors.APIError, attempt: int) -> float:
 # ----------------------------------------------------------------------------
 # Generation with retry + fallback
 # ----------------------------------------------------------------------------
-def generate_post(client, destination: str, status) -> tuple[str, str]:
+def generate_post(client, destination: str, status, log: list) -> tuple[str, str]:
+    """Round-robin over models: one try per live model per round, then back off.
+
+    Demand spikes (503) usually hit one model at a time and last from seconds to
+    a few minutes, so rotating models and waiting between rounds beats hammering
+    a single model.
+    """
     models = discover_models(client, PREFERRED_MODEL)
+    log.append("מודלים שנבדקו: " + ", ".join(models))
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
         temperature=0.9,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
     )
     contents = f"כתוב פוסט על היעד: {destination}"
+    dead = set()  # models that returned 404 or exhausted their daily quota
     last_error = None
 
-    for model in models:
-        for attempt in range(MAX_RETRIES_PER_MODEL):
+    for rnd in range(MAX_ROUNDS):
+        live = [m for m in models if m not in dead]
+        if not live:
+            break
+        wait_hint = 0.0
+        for model in live:
             try:
-                status.update(label=f"מייצר פוסט עם {model} (ניסיון {attempt + 1})...")
+                status.update(label=f"סבב {rnd + 1}/{MAX_ROUNDS}: מנסה את {model}...")
                 resp = client.models.generate_content(model=model, contents=contents, config=config)
                 if resp.text and resp.text.strip():
                     return resp.text, model
-                last_error = RuntimeError("התקבלה תשובה ריקה מהמודל")
+                log.append(f"סבב {rnd + 1} | {model}: תשובה ריקה")
             except errors.APIError as e:
                 last_error = e
+                log.append(f"סבב {rnd + 1} | {model}: {e.code} {getattr(e, 'status', '')}")
                 kind = classify(e)
                 if kind == "fatal":
                     raise
                 if kind in ("daily", "skip"):
-                    break  # go straight to the next model
-                if attempt < MAX_RETRIES_PER_MODEL - 1:
-                    wait = suggested_wait(e, attempt)
-                    status.update(label=f"{model} עמוס, מנסה שוב בעוד {wait:.0f} שניות...")
-                    time.sleep(wait)
-                    continue
-            break  # exhausted retries (or empty response) -> next model
+                    dead.add(model)
+                elif kind == "rate":
+                    wait_hint = max(wait_hint, suggested_wait(e, rnd))
+            except Exception as e:  # timeouts / network hiccups: treat as transient
+                last_error = e
+                log.append(f"סבב {rnd + 1} | {model}: {type(e).__name__}")
+
+        if rnd < MAX_ROUNDS - 1 and any(m not in dead for m in models):
+            wait = max(wait_hint, min(BASE_DELAY * (2 ** rnd), MAX_DELAY) + random.uniform(0, 1))
+            status.update(label=f"השרתים עמוסים, ממתין {wait:.0f} שניות ומנסה שוב...")
+            time.sleep(wait)
 
     raise RuntimeError(
         "כל המודלים הזמינים עמוסים או שמכסת ה-API נוצלה. נסו שוב בעוד כמה דקות, "
@@ -206,9 +232,10 @@ if generate or regenerate:
         if generate and key in st.session_state.posts:
             st.info("הפוסט כבר נוצר ליעד הזה, מציג אותו מהזיכרון (חוסך מכסה).")
         else:
+            log: list = []
             with st.status("הסוכן כותב את הפוסט...", expanded=False) as status:
                 try:
-                    raw, used_model = generate_post(client, destination, status)
+                    raw, used_model = generate_post(client, destination, status, log)
                     st.session_state.posts[key] = (enforce_rules(raw), used_model)
                     status.update(label="הפוסט מוכן!", state="complete")
                 except errors.APIError as e:
@@ -217,6 +244,9 @@ if generate or regenerate:
                 except Exception as e:
                     status.update(label="שגיאה", state="error")
                     st.error(str(e))
+            if log and key not in st.session_state.posts:
+                with st.expander("פרטי הניסיונות (לדיבאג)"):
+                    st.code("\n".join(log), language=None)
 
 entry = st.session_state.posts.get(destination.lower()) if destination else None
 if entry:
