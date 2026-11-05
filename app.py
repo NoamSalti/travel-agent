@@ -1,13 +1,13 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 
 st.set_page_config(page_title="Travel Content Agent", page_icon="✈️")
 st.title("✈️ Travel Content Agent")
 st.markdown("מחולל פוסטים אוטומטי בסגנון 'מטיילים מצייצים'")
 
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-except KeyError:
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+except Exception as e:
     st.error("שגיאה: חסר מפתח API. יש להגדיר GEMINI_API_KEY בהגדרות השרת.")
     st.stop()
 
@@ -17,9 +17,6 @@ if st.button("ייצר פוסט 🪄"):
     if destination:
         with st.spinner("הסוכן כותב את הפוסט..."):
             try:
-                # שימוש במודל הספציפי שגוגל דורשת לפי הודעת השגיאה
-                model = genai.GenerativeModel('gemini-3.8-flash')
-                
                 prompt = f"""
                 אתה קופירייטר מומחה לטיולים הכותב פוסטים עבור קהילת "מטיילים מצייצים".
                 כתוב פוסט מרתק על היעד: {destination}.
@@ -37,9 +34,12 @@ if st.button("ייצר פוסט 🪄"):
                 * הוסף בסוף הפוסט (תחת הכותרת "הצעה לתמונת קרוסלה ראשונה:") רעיון לטקסט שיופיע על התמונה הראשונה, במבנה של טקסט קטן וטקסט גדול.
                 """
                 
-                response = model.generate_content(prompt)
+                response = client.models.generate_content(
+                    model='gemini-3.8-flash',
+                    contents=prompt
+                )
                 
-                st.success(f"הפוסט מוכן! 🤖")
+                st.success("הפוסט מוכן! 🤖")
                 st.markdown(response.text)
             except Exception as e:
                 st.error(f"התרחשה שגיאה מול ה-API: {e}")
