@@ -18,7 +18,7 @@ DEAD_TTL = 30 * 60             # remember exhausted / unavailable models for 30 
 REQUEST_TIMEOUT_MS = 25_000    # a hung call fails fast instead of blocking for minutes
 MAX_OUTPUT_TOKENS = 8192       # generous: "thinking" tokens count against this limit too
 
-CREDIT = "אם יש שאלות, עקבו ותכתבו לה! תודה ל@noam_salti על כל הפרטים והתמונות המדהימות!"
+CREDIT = " תודה ל@noam_salti על כל הפרטים והתמונות המדהימות! אם יש שאלות, עקבו ותכתבו לה!"
 CAROUSEL_HEADER = "הצעה לתמונת קרוסלה ראשונה:"
 
 SYSTEM_INSTRUCTION = f"""
